@@ -245,7 +245,7 @@ def get_credentials_for_url(url: str, username: str | None = None) -> tuple[str,
 
 def try_unlock() -> bool:
     if subprocess.run(['rbw', 'unlocked'], stderr=subprocess.DEVNULL).returncode != 0:
-        subprocess.run([arguments.terminal, 'rbw', 'unlock'])
+        subprocess.run([arguments.terminal, '--title', 'rbw', 'rbw', 'unlock'])
     return subprocess.run(['rbw', 'unlocked'], stderr=subprocess.DEVNULL).returncode == 0
 
 
