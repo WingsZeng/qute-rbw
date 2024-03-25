@@ -131,27 +131,18 @@ class QuteFifo:
         self.command(f"message-warning '{text}'")
 
 
-def get_credentials(
-    domain: str, encoding: str, folder: str | None = None, username: str | None = None
-) -> list[str] | tuple[str, str]:
+def rbw_get(args: list[str]) -> list[str] | tuple[str, str]:
     """
     Gets login credentials for the given domain
 
             Parameters:
-                    domain: The domain to get the credentials for
-                    encoding: Encoding of the stdout/stderr returned by rbw
-                    folder: Limits the credential search scope for the specified folder
-                    username: Limits the credential search scope for the specified user
+                    args: The following command arguments
 
             Returns:
                     A tuple containing username and password, or a list of possible usernames for
                     whom there were credentials found for the given domain.
     """
-    args = ["rbw", "get", "--raw", domain]
-    if folder:
-        args.extend(["--folder", folder])
-    if username:
-        args.append(username)
+    args = ["rbw", "get", "--raw"] + args
     process = subprocess.run(
         args,
         check=False,
@@ -159,7 +150,7 @@ def get_credentials(
         stderr=subprocess.PIPE,
     )
 
-    if err := process.stderr.decode(encoding).strip():
+    if err := process.stderr.decode(arguments.io_encoding).strip():
         if err.endswith("no entry found"):
             return []
 
@@ -170,21 +161,34 @@ def get_credentials(
 
         raise RuntimeError(f"rbw failed: {err}")
 
-    if credentials_data := json.loads(process.stdout.decode(encoding).strip()).get("data"):
+    if credentials_data := json.loads(process.stdout.decode(arguments.io_encoding).strip()).get("data"):
         return credentials_data.get("username"), credentials_data.get("password")
 
     raise RuntimeError("Unexpected json output from rbw")
 
 
-def dmenu(items: list[str], invocation: str, encoding: str) -> str:
-    """Runs dmenu with given arguments."""
+def rbw_list() -> list[str]:
+    """List all items."""
+    args = ["rbw", "list"]
     process = subprocess.run(
-        shlex.split(invocation),
-        input="\n".join(items).encode(encoding),
+        args,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return process.stdout.decode(arguments.io_encoding).splitlines()
+
+
+def dmenu(items: list[str]) -> str:
+    """Runs dmenu with given arguments."""
+    print(arguments.dmenu_invocation)
+    process = subprocess.run(
+        shlex.split(arguments.dmenu_invocation),
+        input="\n".join(items).encode(arguments.io_encoding),
         check=False,
         stdout=subprocess.PIPE,
     )
-    return process.stdout.decode(encoding).strip()
+    return process.stdout.decode(arguments.io_encoding).strip()
 
 
 @unique
@@ -203,16 +207,35 @@ class Message:
     message_type: MessageType
 
 
-def get_credentials_for_url(url: str, username: str | None = None) -> tuple[str, str] | Message:
+def rbw_get_credential(args: list[str]) -> tuple[str, str]:
     """
-    Gets login credentials for the given URL
+    A wrapper of rbw_get, retrieves a single credential using the provided arguments.
 
             Parameters:
-                    url: The url to get the credentials for
-                    username: Limits the credential search scope for the specified user
+                    args: The following command arguments
 
             Returns:
-                    Credentials or message with either an error or information string
+                    A tuple containing username and password
+    """
+    try:
+        credential = rbw_get(args)
+    except (RuntimeError, OSError) as err:
+        return Message(str(err), MessageType.ERROR)
+    if not isinstance(credential, tuple):
+        return Message("Unexpected: multiple results encountered", MessageType.ERROR)
+    return credential
+
+
+def get_credential(uri: str) -> tuple[str, str]:
+    """
+    Gets login credentials for the given domain
+
+            Parameters:
+                    uri: The uri to get the credential for
+
+            Returns:
+                    A tuple containing username and password, or a list of possible usernames for
+                    whom there were credentials found for the given domain.
     """
     extract_result = tldextract.extract(arguments.url)
     scheme = ("https" if arguments.url.startswith("https") else "http") + "://"
@@ -224,7 +247,7 @@ def get_credentials_for_url(url: str, username: str | None = None) -> tuple[str,
 
     for target in targets:
         try:
-            credentials = get_credentials(target, arguments.io_encoding, arguments.folder, username)
+            credentials = rbw_get([target])
         except (RuntimeError, OSError) as err:
             return Message(str(err), MessageType.ERROR)
 
@@ -235,12 +258,15 @@ def get_credentials_for_url(url: str, username: str | None = None) -> tuple[str,
             if not credentials:
                 continue
             # For multiple matches, let the user decide which one to fill, if any
-            if not (choice := dmenu(credentials, arguments.dmenu_invocation, arguments.io_encoding)):
+            if not (username := dmenu(credentials)):
                 return Message("Canceled by user", MessageType.INFO)
 
-            return get_credentials_for_url(url, choice)
+            return rbw_get_credential([uri, username])
 
-    return Message(f'No credentials found for "{extract_result.registered_domain}"', MessageType.INFO)
+    # If no credentials were found for all targets, display a dmenu with all items for the user to choose from
+    if not (name := dmenu(rbw_list())):
+        return Message("Canceled by user", MessageType.INFO)
+    return rbw_get_credential([name])
 
 
 def try_unlock() -> bool:
@@ -259,16 +285,16 @@ def main() -> int:
         if not try_unlock():
             fifo.message_info('rbw unlock failed!')
             return ExitCodes.SUCCESS
-        credentials = get_credentials_for_url(arguments.url)
-        if isinstance(credentials, Message):
-            if credentials.message_type == MessageType.ERROR:
-                fifo.message_error(credentials.message)
+        credential = get_credential(uri=arguments.url)
+        if isinstance(credential, Message):
+            if credential.message_type == MessageType.ERROR:
+                fifo.message_error(credential.message)
                 return ExitCodes.FAILURE
 
-            fifo.message_info(credentials.message)
+            fifo.message_info(credential.message)
             return ExitCodes.SUCCESS
 
-        username, password = credentials
+        username, password = credential
 
         if arguments.username_only:
             fifo.fake_key(username)
